@@ -1,0 +1,105 @@
+pipeline {
+    agent any
+    
+    tools {
+        jdk 'jdk11'
+        maven 'maven'
+    }
+    
+    environment {
+        SCANNER_HOME = tool 'sonar'
+        IMAGE_NAME = "aakashshinde09/angular_pipeline"
+    }
+
+    stages {
+        stage('Pull') {
+            steps {
+                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/aakashshinde09/angular_jenkins_kubernetes.git'
+            }
+        }
+        stage('Build') {
+            steps {
+                sh '''
+                    cd spring-backend
+                    mvn clean package -Dmaven.test.skip=true
+                '''
+            }
+        }
+        stage('Test') {
+            steps {
+                sh '''
+                    cd spring-backend
+                    mvn sonar:sonar \
+                        -Dsonar.projectKey=angular \
+                        -Dsonar.host.url=http://54.164.210.112:9000 \
+                        -Dsonar.login=b05c10dd3bb28ac4d092bc254cf821a8c3809789
+                '''
+            }
+        }
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    def frontendTag = "${IMAGE_NAME}:frontend-${env.BUILD_NUMBER}"
+                    def backendTag = "${IMAGE_NAME}:backend-${env.BUILD_NUMBER}"
+                    sshagent(['doc']) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ec2-user@172.31.82.201 '
+                                cd /home/ec2-user &&
+                                rm -rf angular_jenkins_kubernetes/ &&
+                                sudo docker stop \$(sudo docker ps -q) || true &&
+                                sudo docker rm \$(sudo docker ps -aq) || true &&
+                                sudo docker rmi \$(sudo docker images -q) || true &&
+                                git clone https://github.com/aakashshinde09/angular_jenkins_kubernetes.git &&
+                                cd angular_jenkins_kubernetes/frontend &&
+                                sudo docker build -t "${frontendTag}" . &&
+                                cd ../.. &&
+                                cd angular_jenkins_kubernetes/backend &&
+                                sudo docker build -t "spring" . &&
+                                sudo docker tag spring "${backendTag}"
+                            '
+                        """
+                    }
+                }
+            }
+        }
+        stage('Push Docker Images to DockerHub') {
+            steps {
+                script {
+                    def frontendTag = "${IMAGE_NAME}:frontend-${env.BUILD_NUMBER}"
+                    def backendTag = "${IMAGE_NAME}:backend-${env.BUILD_NUMBER}"
+                    sshagent(['doc']) {
+                        withCredentials([string(credentialsId: 'kubernetes', variable: 'kube')]) {
+                            sh """
+                                ssh -o StrictHostKeyChecking=no ec2-user@172.31.82.201 "
+                                sudo docker login -u aakashshinde09 -p ${kube} &&
+                                sudo docker push ${frontendTag} &&
+                                sudo docker push ${backendTag}
+                                "
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        stage('Deploy application to kubernetes cluster') {
+            steps {
+                script {
+                    def backendTag = "${IMAGE_NAME}:backend-${env.BUILD_NUMBER}"
+                    def frontendTag = "${IMAGE_NAME}:frontend-${env.BUILD_NUMBER}"
+                    sshagent(['doc']) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ec2-user@172.31.82.201 "
+                            cd /home/ec2-user/angular_jenkins_kubernetes/backend/ &&
+                            sed -i 's|image: aakashshinde09/angular_pipeline:backend|image: ${backendTag}|' deployment.yaml &&
+                            sudo kubectl apply -f . &&
+                            cd ../frontend/ &&
+                            sed -i 's|image: aakashshinde09/angular_pipeline:frontend|image: ${frontendTag}|' deployment.yaml &&
+                            sudo kubectl apply -f .
+                            "
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
