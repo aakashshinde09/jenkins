@@ -1,0 +1,76 @@
+pipeline {
+    agent any
+    
+    tools {
+        jdk 'jdk11'
+        maven 'maven'
+    }
+    
+    environment {
+        SCANNER_HOME = tool 'sonar'
+    }
+
+    stages {
+        stage('Pull') {
+            steps {
+                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/aakashshinde09/angular_springboot_jenkins_docker_container.git'
+            }
+        }
+        stage('Build') {
+            steps {
+                sh '''
+                    cd backend
+                    chmod 777 entrypoint.sh
+                    ./entrypoint.sh
+                    cd ..
+                    cd spring-backend
+                    mvn clean package -Dmaven.test.skip=true
+                '''
+            }
+        }
+        stage('Test') {
+            steps {
+                sh '''
+                    cd spring-backend
+                    mvn sonar:sonar \
+                        -Dsonar.projectKey=angular \
+                        -Dsonar.host.url=http://54.164.210.112:9000 \
+                        -Dsonar.login=b05c10dd3bb28ac4d092bc254cf821a8c3809789
+                '''
+            }
+        }
+        stage('Copy the build to remote Server') {
+            steps {
+                sshagent(['doc']) {
+                    sh '''
+                        scp -o StrictHostKeyChecking=no spring-backend/target/spring-backend-v1.jar ec2-user@172.31.82.201:/home/ec2-user/
+                    '''
+                }
+            }
+        }
+        stage('Deploy to Container') {
+            steps {
+                sshagent(['doc']) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no ec2-user@172.31.82.201 '
+                            cd /home/ec2-user &&
+                            rm -rf angular_springboot_jenkins_docker_container &&
+                            sudo docker stop $(sudo docker ps -q) || true &&
+                            sudo docker rm $(sudo docker ps -aq) || true &&
+                            sudo docker rmi $(sudo docker images -q) || true &&
+                            git clone https://github.com/aakashshinde09/angular_springboot_jenkins_docker_container.git &&
+                            cd angular_springboot_jenkins_docker_container/frontend &&
+                            sudo docker build -t frontend . &&
+                            sudo docker run -d -p 30080:30080 frontend &&
+                            cd ../.. &&
+                            mv spring-backend-v1.jar angular_springboot_jenkins_docker_container/backend/ &&
+                            cd angular_springboot_jenkins_docker_container/backend &&
+                            sudo docker build -t backend . &&
+                            sudo docker run -d -p 8085:8085 backend
+                        '
+                    '''
+                }
+            }
+        }
+    }
+}
